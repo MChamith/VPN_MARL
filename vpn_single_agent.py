@@ -104,7 +104,7 @@ class OutComeModel(nn.Module):
         self.option_conv1 = OptionConv(input_channels, 32, kernel_size=3, stride=1,
                                        num_options=num_actions)
         self.conv2 = nn.Conv2d(32, 32, kernel_size=3, stride=1)  # Another 64 filters of size 3x3
-        self.fc1 = nn.Linear(1568, 128)  # Fully connected layer (64 hidden units)
+        self.fc1 = nn.Linear(1568*4, 128)  # Fully connected layer (64 hidden units)
         self.fc2 = nn.Linear(128, 2)  # Output layer with 2 units
 
     def forward(self, x, option):
@@ -127,9 +127,12 @@ class ValueModel(nn.Module):
         self.fc2 = nn.Linear(128, 1)
 
     def forward(self, abs_state):
+
         abs_state = torch.flatten(abs_state)
+
         x = self.fc1(abs_state)
         x = self.fc2(x)
+        # print('value shape  ' + str(x.shape))
         return x
 
 
@@ -139,7 +142,7 @@ class ValuePredictionNetwork(nn.Module):
         self.encode_model = EncoderModel(input_dim, hidden_dim)
         self.transition_model = TransitionModel(hidden_dim, num_actions)
         self.outcome_model = OutComeModel(hidden_dim, num_actions)
-        self.value_model = ValueModel(2592)
+        self.value_model = ValueModel(2592*4)
         self.num_actions = num_actions
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -164,7 +167,7 @@ class ValuePredictionNetwork(nn.Module):
         action = action.to(self.device)
 
         action_index = torch.argmax(action).item()
-        if state.size() == torch.Size([1, 1, 84, 84]):
+        if state.size()[2:] == torch.Size([84, 84]):
             abs_state = self.encode_model(state).to(self.device)
         else:
             abs_state = self.transition_model(state, action_index)
@@ -255,11 +258,11 @@ def calculate_loss(target_val, target_reward, target_discount, pred_val, pred_re
     #
     # return n_step_loss
 
-    loss_val = (target_val - torch.tensor(pred_val).cuda()) ** 2  # Unsqueeze to align dimensions for broadcasting
-    loss_reward = (target_reward - torch.tensor(pred_reward).cuda()) ** 2
+    loss_val = (target_val - torch.tensor(pred_val).to(device)) ** 2  # Unsqueeze to align dimensions for broadcasting
+    loss_reward = (target_reward - torch.tensor(pred_reward).to(device)) ** 2
     # print('target discount ' + str(target_discount))
     # print('pred discount ' + str(pred_discount))
-    loss_discount = (torch.log(target_discount) - torch.log(torch.tensor(pred_discount).cuda())) ** 2
+    loss_discount = (torch.log(target_discount) - torch.log(torch.tensor(pred_discount).to(device))) ** 2
     # print('loss discount ' + str(loss_discount))
     # Sum the losses over the batch and n_steps
     n_step_loss = torch.sum(loss_val + loss_reward + loss_discount)
@@ -308,7 +311,7 @@ if __name__ == "__main__":
     env = PreprocessAtari(env)
     env = FrameSkip(env, skip=4)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    num_steps = 10000000
+
     # print('observation space ' + str(env.observation_space.shape))
     input_dim = env.observation_space.shape[-1]
     # print('action space ' + str(env.action_space))
@@ -333,11 +336,19 @@ if __name__ == "__main__":
     eps = 0.99
     eps_decay = 0.9998
     eps_min = 0.001
+    num_steps = 1
+    total_num_steps = 10000000
 
-    for episode in range(1, num_episodes+1):
+    while num_steps < total_num_steps:
 
         T = 0
         state, _ = env.reset()
+        state = np.transpose(state, (2, 0, 1))
+        state = np.array([state, state, state, state])
+
+
+        state = torch.tensor(state, dtype=torch.float32).to(device)
+        # print('original state shape ' + str(state.shape))
         is_terminal = False
 
         local_episode = 0
@@ -356,15 +367,17 @@ if __name__ == "__main__":
                 # print('state shape ' + str(state.shape))
                 if t == 0:
                     states.append(state)
-                print('state shape ' + str(state.shape) + 't ' + str(t))
-                state = np.transpose(state, (0, 3, 1, 2))
-                state = torch.tensor(state, dtype=torch.float32).unsqueeze(
-                    0).cuda()  # Add batch dimension and move to GPU
+                # print('state shape ' + str(state.shape) + 't ' + str(t))
+
+
                 # state.permute(2, 0, 1)
+                # print('tensor shape ' + str(state.shape))
                 action_ohe, action = epsilon_greedy_policy(vpn, env, state, depth, eps, b)
                 _, gamma, value, _ = vpn.forward(state, action_ohe)
                 # print('taking action ' + str(action))
                 state, reward, terminated, truncated, info = env.step(action)
+                num_steps += 1
+                state = state.to(device)
                 total_reward += reward
                 rewards.append(reward)
                 gammas.append(gamma)
@@ -383,9 +396,9 @@ if __name__ == "__main__":
                 R = 0
             else:
                 last_state = states[-1]
-                last_state = np.transpose(last_state, (2, 0, 1))  # Convert (96, 96, 3) to (3, 96, 96)
-                last_state = torch.tensor(last_state, dtype=torch.float32).unsqueeze(
-                    0).cuda()  # Add batch dimension and move to GPU
+                # last_state = np.transpose(last_state, (2, 0, 1))  # Convert (96, 96, 3) to (3, 96, 96)
+                # last_state = torch.tensor(last_state, dtype=torch.float32).unsqueeze(
+                #     0).cuda()  # Add batch dimension and move to GPU
                 q_depth = []
                 with torch.no_grad():
                     q_values = []
@@ -404,24 +417,25 @@ if __name__ == "__main__":
                 action_ohe = torch.zeros(env.action_space.n)
                 action_ohe[action] = 1
 
-                state_t = np.transpose(states[t], (2, 0, 1))  # Convert (96, 96, 3) to (3, 96, 96)
-                state_t = torch.tensor(state_t, dtype=torch.float32).unsqueeze(
-                    0).cuda()  # Add batch dimension and move to GPU
+                # state_t = np.transpose(states[t], (2, 0, 1))  # Convert (96, 96, 3) to (3, 96, 96)
+                # state_t = torch.tensor(state_t, dtype=torch.float32).unsqueeze(
+                #     0).cuda()  # Add batch dimension and move to GPU
 
-                q_value, best_rewards, best_discounts, best_values, best_path = q_plan(state_t, action_ohe, depth,
+                q_value, best_rewards, best_discounts, best_values, best_path = q_plan(states[t], action_ohe, depth,
                                                                                        vpn_target,
                                                                                        env,
                                                                                        b)
 
                 loss += calculate_loss(R, rewards[t], gammas[t], best_values, best_rewards, best_discounts)
-            print('global episode ' + str(episode) + ' local episode ' + str(local_episode) + ' loss ' + str(
+            print('Num steps ' + str(num_steps) + ' local episode ' + str(local_episode) + ' loss ' + str(
                 loss.item()) + ' total reward ' + str(total_reward))
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
-            if (episode * local_episode) % 10000 == 0:
-                print('updating parameters')
+            if num_steps % 10000 == 0:
+                print('updating parameters at step ' + str(num_steps))
+                print('current epsilon ' + str(eps))
                 update_parameters(vpn, vpn_target)
 
             eps = max(eps * eps_decay, eps_min)
